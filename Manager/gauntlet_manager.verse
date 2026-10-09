@@ -5,17 +5,8 @@ using { /Fortnite.com/Characters }
 using { /Fortnite.com/Game }
 using { /Verse.org/Simulation }
 
-<#
-    Gauntlet Manager
-    Handles a synchronized, multi-room gun game sequence.
-    Features async elimination tracking across respawns, dynamic room advancement, 
-    and a stasis-free waiting phase with synchronized weapon distribution.
-#>
 gauntlet_manager := class(creative_device):
 
-    # -------------------------------------------------------------------------
-    # EXTERNAL DEVICES
-    # -------------------------------------------------------------------------
     @editable
     TestButton : button_device = button_device{}
 
@@ -28,24 +19,27 @@ gauntlet_manager := class(creative_device):
     @editable
     WeaponStripper : item_remover_device = item_remover_device{}
 
-    # -------------------------------------------------------------------------
-    # INTERNAL STATE
-    # -------------------------------------------------------------------------
-    # Maps an agent to their current room index (0-based)
-    var PlayerCurrentRoom : [agent]int = map{}
-    
-    # Tracks the number of players waiting in a specific room
-    var PlayersInRoomCount : [int]int = map{}
+    @editable
+    RoomGuardSpawners : []guard_spawner_device = array{}
 
-    # Flags if a room's 5-second countdown has already been initiated
+    # Lets you track Guard/NPC kills
+    @editable
+    ElimManager : elimination_manager_device = elimination_manager_device{}
+
+    # Bypasses the "Wait for Everyone" lock so you can test alone
+    @editable
+    SoloTestMode : logic = false
+
+    var PlayerCurrentRoom : [agent]int = map{}
+    var PlayersInRoomCount : [int]int = map{}
     var RoomActiveMap : [int]logic = map{}
 
-    # -------------------------------------------------------------------------
-    # INITIALIZATION & LIFECYCLE
-    # -------------------------------------------------------------------------
     OnBegin<override>()<suspends> : void =
         TestButton.InteractedWithEvent.Subscribe(OnTestButtonPressed)
         GetPlayspace().PlayerAddedEvent().Subscribe(OnPlayerAdded)
+        
+        # Subscribes to ANY elimination on the map (Players or Guards)
+        ElimManager.EliminationEvent.Subscribe(OnAnyElimination)
 
         for (Player : GetPlayspace().GetPlayers()):
             InitializePlayer(Player)
@@ -56,28 +50,14 @@ gauntlet_manager := class(creative_device):
     InitializePlayer(Player : agent) : void =
         if (set PlayerCurrentRoom[Player] = 0):
             RegisterPlayerInRoom(Player, 0)
-            
-            # Spawn asynchronous loop to monitor this player's eliminations across respawns
-            spawn{ MonitorPlayerEliminations(Player) }
 
     OnTestButtonPressed(Agent : agent) : void =
         AdvancePlayerRoom(Agent)
 
-    # -------------------------------------------------------------------------
-    # CORE GAMEPLAY LOGIC
-    # -------------------------------------------------------------------------
-    MonitorPlayerEliminations(Player : agent)<suspends> : void =
-        loop:
-            if (FortChar := Player.GetFortCharacter[]):
-                ElimResult := FortChar.EliminatedEvent().Await()
-                
-                if (KillerChar := ElimResult.EliminatingCharacter?):
-                    if (KillerAgent := KillerChar.GetAgent[]):
-                        AdvancePlayerRoom(KillerAgent)
-                
-                Sleep(1.0) # Buffer for respawn sequence
-            else:
-                Sleep(0.2) # Await valid character body
+    # Replaces MonitorPlayerEliminations and accepts ?agent from Elimination Manager
+    OnAnyElimination(MaybeAgent : ?agent) : void =
+        if (Agent := MaybeAgent?):
+            AdvancePlayerRoom(Agent)
 
     AdvancePlayerRoom(Agent : agent) : void =
         if (CurrentRoomIndex := PlayerCurrentRoom[Agent]):
@@ -85,28 +65,27 @@ gauntlet_manager := class(creative_device):
                 NewRoomIndex := CurrentRoomIndex + 1
                 
                 if (set PlayerCurrentRoom[Agent] = NewRoomIndex):
-                    # Strip previous weapon to ensure unarmed waiting phase
                     WeaponStripper.Remove(Agent)
                     TargetTeleporter.Teleport(Agent)
-                    
-                    # Register arrival in new room (weapons withheld until countdown completes)
                     RegisterPlayerInRoom(Agent, NewRoomIndex)
                     Print("Player advanced to Room {NewRoomIndex + 1}!")
             else:
                 HandleVictory(Agent)
 
-    # -------------------------------------------------------------------------
-    # ROOM SYNCHRONIZATION
-    # -------------------------------------------------------------------------
     RegisterPlayerInRoom(Agent : agent, RoomIndex : int) : void =
         CurrentCount := GetPlayersInRoomCount(RoomIndex)
         NewCount := CurrentCount + 1
         
         if (set PlayersInRoomCount[RoomIndex] = NewCount):
-            TotalPlayers := GetPlayspace().GetPlayers().Length
             
-            # Trigger synchronization countdown once all active players are present
-            if (NewCount >= TotalPlayers):
+            # Determine how many players we are waiting for
+            var RequiredPlayers : int = GetPlayspace().GetPlayers().Length
+            
+            # Override if testing solo
+            if (SoloTestMode = true):
+                set RequiredPlayers = 1
+            
+            if (NewCount >= RequiredPlayers):
                 if (IsRoomActive(RoomIndex) = false):
                     spawn{ StartRoomCountdown(RoomIndex) }
 
@@ -124,10 +103,16 @@ gauntlet_manager := class(creative_device):
             
             Print("FIGHT!")
             GrantWeaponsToRoom(RoomIndex)
+            
+            # Enable device, wait 1 tick for initialization, then spawn
+            if (Spawner := RoomGuardSpawners[RoomIndex]):
+                Spawner.Enable()
+                Sleep(0.1) # Critical tick delay for engine state update
+                Spawner.Spawn()
+                Print("Successfully spawned guard for Room {RoomIndex + 1}")
+            else:
+                Print("ERROR: RoomGuardSpawners[{RoomIndex}] is not assigned in the Details panel!")
 
-    # -------------------------------------------------------------------------
-    # INVENTORY & UTILITY
-    # -------------------------------------------------------------------------
     GrantWeaponsToRoom(RoomIndex : int) : void =
         for (Player : GetPlayspace().GetPlayers()):
             if (PlayerRoom := PlayerCurrentRoom[Player], PlayerRoom = RoomIndex):
