@@ -4,6 +4,7 @@ using { /Fortnite.com/Devices }
 using { /Fortnite.com/Characters }
 using { /Fortnite.com/Game }
 using { /Verse.org/Simulation }
+using { /Verse.org/Random }
 
 # Localized Text Templates for HUD & Lobby
 LobbyWaitingText<localizes>(Current : int, Required : int) : message = "Waiting for players: {Current} / {Required}"
@@ -27,16 +28,25 @@ gauntlet_manager := class(creative_device):
     @editable
     LobbyHUD : hud_message_device = hud_message_device{}
 
-    # --- ROOM & GAME DEVICES ---
+    # --- ROOM TELEPORTERS & HUDs ---
     @editable
     RoomTeleporters : []teleporter_device = array{}
 
     @editable
-    RoomItemGranters : []item_granter_device = array{}
-
-    @editable
     RoomHUDMessages : []hud_message_device = array{}
 
+    # --- RANDOMIZED WEAPON POOLS PER ROOM ---
+    # Populate these with multiple Item Granters per room in UEFN
+    @editable
+    Room1GranterPool : []item_granter_device = array{}
+
+    @editable
+    Room2GranterPool : []item_granter_device = array{}
+
+    @editable
+    Room3GranterPool : []item_granter_device = array{}
+
+    # --- UTILITY DEVICES ---
     @editable
     WeaponStripper : item_remover_device = item_remover_device{}
 
@@ -54,6 +64,7 @@ gauntlet_manager := class(creative_device):
     var PlayerCurrentRoom : [agent]int = map{}
     var PlayersInRoomCount : [int]int = map{}
     var RoomActiveMap : [int]logic = map{}
+    var ActiveRoomGranterIndices : [int]int = map{}
     
     var InLobby : [agent]logic = map{}
     var IsSpectator : [agent]logic = map{}
@@ -115,6 +126,9 @@ gauntlet_manager := class(creative_device):
     StartGameRound() : void =
         set RoundInProgress = true
         
+        # Pick random weapons for each room for this specific match
+        SelectRandomWeaponsForMatch()
+        
         # Hide Lobby HUD and prepare all active players
         for (Player : GetPlayspace().GetPlayers()):
             if (IsInLobby(Player) = true):
@@ -126,6 +140,25 @@ gauntlet_manager := class(creative_device):
 
         # Kick off Room 1 countdown
         spawn{ StartRoomCountdown(0) }
+
+    SelectRandomWeaponsForMatch() : void =
+        # Pick random weapon for Room 1 (Index 0)
+        if (Room1GranterPool.Length > 0):
+            RandomIndex := GetRandomInt(0, Room1GranterPool.Length - 1)
+            if (set ActiveRoomGranterIndices[0] = RandomIndex):
+                Print("Selected Room 1 Weapon Index: {RandomIndex}")
+
+        # Pick random weapon for Room 2 (Index 1)
+        if (Room2GranterPool.Length > 0):
+            RandomIndex := GetRandomInt(0, Room2GranterPool.Length - 1)
+            if (set ActiveRoomGranterIndices[1] = RandomIndex):
+                Print("Selected Room 2 Weapon Index: {RandomIndex}")
+
+        # Pick random weapon for Room 3 (Index 2)
+        if (Room3GranterPool.Length > 0):
+            RandomIndex := GetRandomInt(0, Room3GranterPool.Length - 1)
+            if (set ActiveRoomGranterIndices[2] = RandomIndex):
+                Print("Selected Room 3 Weapon Index: {RandomIndex}")
 
     OnAnyElimination(MaybeAgent : ?agent) : void =
         if (Agent := MaybeAgent?):
@@ -232,8 +265,13 @@ gauntlet_manager := class(creative_device):
                 GrantWeaponForRoom(Player, RoomIndex)
 
     GrantWeaponForRoom(Agent : agent, RoomIndex : int) : void =
-        if (Granter := RoomItemGranters[RoomIndex]):
-            Granter.GrantItem(Agent)
+        if (SelectedGranterIndex := ActiveRoomGranterIndices[RoomIndex]):
+            if (RoomIndex = 0, Granter := Room1GranterPool[SelectedGranterIndex]):
+                Granter.GrantItem(Agent)
+            else if (RoomIndex = 1, Granter := Room2GranterPool[SelectedGranterIndex]):
+                Granter.GrantItem(Agent)
+            else if (RoomIndex = 2, Granter := Room3GranterPool[SelectedGranterIndex]):
+                Granter.GrantItem(Agent)
 
     GetPlayersInRoomCount(RoomIndex : int) : int =
         if (Val := PlayersInRoomCount[RoomIndex]):
@@ -286,6 +324,7 @@ gauntlet_manager := class(creative_device):
         set RoomActiveMap = map{}
         set PlayerCurrentRoom = map{}
         set ActiveGamePlayers = map{}
+        set ActiveRoomGranterIndices = map{}
 
         # Hide active room HUDs
         for (HUD : RoomHUDMessages):
@@ -294,7 +333,7 @@ gauntlet_manager := class(creative_device):
         # Teleport ALL players back to pre-game lobby and re-register them
         for (Player : GetPlayspace().GetPlayers()):
             if (set IsSpectator[Player] = false):
-                Print("Reset spectator status for player.")
+                Print("Reset spectator status.")
             WeaponStripper.Remove(Player)
             
             # Re-initialize player in lobby
