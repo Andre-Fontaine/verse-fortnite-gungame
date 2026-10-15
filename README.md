@@ -96,7 +96,3 @@ Main sections of the code:
 ## Learning notes
 
 This project is part of my journey learning Verse. Concepts it uses include classes, `@editable` properties, maps, failable expressions, `spawn` and `Sleep`, events and `Subscribe`, and localized messages.
-
-## License
-
-Add a license of your choice here (for example MIT).
