@@ -228,11 +228,14 @@ gauntlet_manager := class(creative_device):
         # Verify player is still active, still in this same room, and hasn't qualified yet
         if (IsActiveInGame(Agent) = true, CurrentRoom := PlayerCurrentRoom[Agent], CurrentRoom = RoomIndex, IsQualified(Agent) = false):
             if (RoomIndex < RoomTeleporters.Length, TargetTeleporter := RoomTeleporters[RoomIndex]):
+                # Strip all default items/pickaxes right after spawning
                 WeaponStripper.Remove(Agent)
                 TargetTeleporter.Teleport(Agent)
                 spawn{ TeleportAgentToRoom(Agent, TargetTeleporter, RoomIndex) }
 
                 Sleep(0.3)
+                # Extra strip safeguard before granting room weapon
+                WeaponStripper.Remove(Agent)
                 GrantWeaponForRoom(Agent, RoomIndex)
                 Print("Player respawned back in Room {RoomIndex + 1}")
 
