@@ -16,6 +16,16 @@ gauntlet_manager := class(creative_device):
     @editable
     LobbyRequiredPlayers : int = 10
 
+    # Below this many active players, kills stop counting and the Final Showdown starts.
+    # Real game: 5. Testing with guards and few players: 1.
+    @editable
+    MinPlayersForRooms : int = 5
+
+    # When true, the round never ends just because only one player is left.
+    # Turn this ON for solo or small-group testing, OFF for the real game.
+    @editable
+    SoloTestMode : logic = false
+
     @editable
     RoomKillRequirements : []int = array{5, 3, 2, 1, 1}
 
@@ -54,6 +64,22 @@ gauntlet_manager := class(creative_device):
     @editable
     Room5GranterPool : []item_granter_device = array{}
 
+    # --- GUARD SPAWNERS (one list per room) ---
+    @editable
+    Room1Spawners : []guard_spawner_device = array{}
+
+    @editable
+    Room2Spawners : []guard_spawner_device = array{}
+
+    @editable
+    Room3Spawners : []guard_spawner_device = array{}
+
+    @editable
+    Room4Spawners : []guard_spawner_device = array{}
+
+    @editable
+    Room5Spawners : []guard_spawner_device = array{}
+
     # --- UTILITY DEVICES ---
     @editable
     WeaponStripper : item_remover_device = item_remover_device{}
@@ -82,6 +108,10 @@ gauntlet_manager := class(creative_device):
     var IsSpectator : [agent]logic = map{}
     var ActiveGamePlayers : [agent]logic = map{}
 
+    # Remembers which players already have an elimination listener,
+    # so we don't subscribe twice after a reset.
+    var SubscribedPlayers : [agent]logic = map{}
+
     var LobbyPlayerCount : int = 0
     var LobbySequenceStarted : logic = false
     var RoundInProgress : logic = false
@@ -96,6 +126,15 @@ gauntlet_manager := class(creative_device):
         Print("Gauntlet Manager OnBegin started.")
         GetPlayspace().PlayerAddedEvent().Subscribe(OnPlayerAdded)
 
+        # Listen for guard eliminations so kills on guards count.
+        AllSpawners := array{Room1Spawners, Room2Spawners, Room3Spawners, Room4Spawners, Room5Spawners}
+        for (RoomSpawners : AllSpawners):
+            for (Spawner : RoomSpawners):
+                Spawner.EliminatedEvent.Subscribe(OnGuardEliminated)
+
+        # Start with every spawner off until a room begins.
+        SetActiveRoomSpawners(-1)
+
         for (Agent : GetPlayspace().GetParticipants()):
             InitializePlayerInLobby(Agent)
 
@@ -107,8 +146,11 @@ gauntlet_manager := class(creative_device):
         if (IsActiveInGame(Agent) = true) { return }
         if (IsSpectator[Agent] = true) { return }
 
-        if (FortChar := Agent.GetFortCharacter[]):
-            FortChar.EliminatedEvent().Subscribe(OnPlayerEliminated)
+        if (IsSubscribed(Agent) = false):
+            if (FortChar := Agent.GetFortCharacter[]):
+                FortChar.EliminatedEvent().Subscribe(OnPlayerEliminated)
+                if (set SubscribedPlayers[Agent] = true):
+                    Print("Subscribed to player eliminations.")
 
         if (RoundInProgress = true):
             MakePlayerSpectator(Agent)
@@ -202,6 +244,17 @@ gauntlet_manager := class(creative_device):
                         NextHUD.SetText(QualifiedWaitingText())
                         NextHUD.Show(Agent)
 
+    # Turns one room's guard spawners on and all the others off.
+    # Pass -1 to turn every spawner off.
+    SetActiveRoomSpawners(RoomIndex : int) : void =
+        Spawners := array{Room1Spawners, Room2Spawners, Room3Spawners, Room4Spawners, Room5Spawners}
+        for (Idx -> RoomSpawners : Spawners):
+            for (Spawner : RoomSpawners):
+                if (Idx = RoomIndex):
+                    Spawner.Enable()
+                else:
+                    Spawner.Disable()
+
 
     # ==========================================
     # PROGRESSION, QUOTAS & COMBAT LOGIC
@@ -224,6 +277,7 @@ gauntlet_manager := class(creative_device):
         if (set RoomTargetQuota[RoomIndex] = Quota, set QualifiedRoomSurvivors[RoomIndex] = 0):
             Print("Room {RoomIndex + 1} Target Survivor Quota: {Quota} (from {TotalPlayersInRoom} participants)")
 
+    # A player was eliminated (by another player or anything else).
     OnPlayerEliminated(Result : elimination_result) : void =
         VictimChar := Result.EliminatedCharacter
         if (VictimAgent := VictimChar.GetAgent[]):
@@ -231,17 +285,30 @@ gauntlet_manager := class(creative_device):
                 if (not (KillerAgent = VictimAgent)):
                     OnPlayerScoredKill(KillerAgent)
 
-            if (IsFinalShowdownActive = true or CheckRemainingActivePlayersCount() < 5):
-                CheckRoundEndCondition()
-            else:
+            if (IsFinalShowdownActive = false and CheckRemainingActivePlayersCount() >= MinPlayersForRooms):
                 if (CurrentRoomIndex := PlayerCurrentRoom[VictimAgent]):
                     CheckRoomWaveCompletion(CurrentRoomIndex)
 
             CheckRoundEndCondition()
 
+    # A guard was eliminated. Credit the player who did it.
+    OnGuardEliminated(Result : device_ai_interaction_result) : void =
+        Print("Guard eliminated event fired")
+        if (Killer := Result.Source?):
+            Print("Guard killer found")
+            OnPlayerScoredKill(Killer)
+        else:
+            Print("Guard eliminated with no killer")
+
     OnPlayerScoredKill(Killer : agent) : void =
+        Print("ScoredKill. Active count: {CheckRemainingActivePlayersCount()}, min players: {MinPlayersForRooms}")
+        if (IsActiveInGame(Killer) = false):
+            Print("ScoredKill ignored: killer is not active in game")
+        if (IsFinalShowdownActive = true):
+            Print("ScoredKill ignored: final showdown is active")
+
         if (IsActiveInGame(Killer) = true):
-            if (IsFinalShowdownActive = true or CheckRemainingActivePlayersCount() < 5) { return }
+            if (IsFinalShowdownActive = true or CheckRemainingActivePlayersCount() < MinPlayersForRooms) { return }
 
             if (CurrentRoom := PlayerCurrentRoom[Killer], IsQualified(Killer) = false):
                 CurrentKills := GetPlayerKills(Killer) + 1
@@ -253,28 +320,28 @@ gauntlet_manager := class(creative_device):
                         MarkPlayerQualified(Killer, CurrentRoom)
 
     MarkPlayerQualified(Agent : agent, RoomIndex : int) : void =
-        var RemainingBots : []agent = array{}
+        var OtherPlayers : []agent = array{}
         for (Participant : GetPlayspace().GetParticipants()):
             if (PlayerRoom := PlayerCurrentRoom[Participant], PlayerRoom = RoomIndex, IsActiveInGame(Participant) = true, not (Participant = Agent)):
-                set RemainingBots += array{Participant}
+                set OtherPlayers += array{Participant}
 
-        TotalBots := RemainingBots.Length
-        var BotsToQualifyCount : int = 0
+        TotalOthers := OtherPlayers.Length
+        var OthersToQualifyCount : int = 0
         # 75% of remaining players, using integer math
-        if (CalculatedBots := Quotient[TotalBots * 3, 4]):
-            set BotsToQualifyCount = CalculatedBots
+        if (CalculatedOthers := Quotient[TotalOthers * 3, 4]):
+            set OthersToQualifyCount = CalculatedOthers
 
         if (set PlayerIsQualified[Agent] = true):
             if (RoomIndex < RoomHUDMessages.Length, OldHUD := RoomHUDMessages[RoomIndex]):
                 OldHUD.Hide(Agent)
             AdvancePlayerToNextRoomEarly(Agent, RoomIndex)
 
-        var QualifiedBotsCount : int = 0
-        for (Bot : RemainingBots):
-            if (QualifiedBotsCount < BotsToQualifyCount):
-                if (set PlayerIsQualified[Bot] = true):
-                    set QualifiedBotsCount += 1
-                    AdvancePlayerToNextRoomEarly(Bot, RoomIndex)
+        var QualifiedOthersCount : int = 0
+        for (Other : OtherPlayers):
+            if (QualifiedOthersCount < OthersToQualifyCount):
+                if (set PlayerIsQualified[Other] = true):
+                    set QualifiedOthersCount += 1
+                    AdvancePlayerToNextRoomEarly(Other, RoomIndex)
 
         CompleteRoomWaveAndTransition(RoomIndex)
 
@@ -284,6 +351,7 @@ gauntlet_manager := class(creative_device):
         if (RoomIndex < RoomHUDMessages.Length, HUD := RoomHUDMessages[RoomIndex]):
             HUD.Hide()
 
+        # Anyone in this room who didn't qualify becomes a spectator.
         for (Agent : GetPlayspace().GetParticipants()):
             if (PlayerRoom := PlayerCurrentRoom[Agent], PlayerRoom = RoomIndex, IsActiveInGame(Agent) = true):
                 if (IsQualified(Agent) = false):
@@ -295,9 +363,9 @@ gauntlet_manager := class(creative_device):
             if (PlayerRoom := PlayerCurrentRoom[Agent], PlayerRoom = NextRoomIndex, IsActiveInGame(Agent) = true):
                 set SurvivingCount += 1
 
-        if (SurvivingCount < 5 and IsFinalShowdownActive = false):
+        if (SurvivingCount < MinPlayersForRooms and IsFinalShowdownActive = false):
             set IsFinalShowdownActive = true
-            Print("Under 5 players remaining! Triggering Final Showdown.")
+            Print("Too few players remaining! Triggering Final Showdown.")
             FinalIndex := RoomTeleporters.Length - 1
             if (FinalIndex >= 0, FinalTeleporter := RoomTeleporters[FinalIndex]):
                 for (Agent : GetPlayspace().GetParticipants()):
@@ -308,7 +376,7 @@ gauntlet_manager := class(creative_device):
                             spawn{ TeleportAgentToRoom(Agent, FinalTeleporter, FinalIndex) }
 
                 spawn{ StartFinalShowdownSequence(FinalIndex) }
-        else if (NextRoomIndex >= MaxRooms or SurvivingCount <= 1):
+        else if (NextRoomIndex >= MaxRooms):
             for (Agent : GetPlayspace().GetParticipants()):
                 if (IsActiveInGame(Agent) = true):
                     HandleVictory(Agent)
@@ -320,12 +388,8 @@ gauntlet_manager := class(creative_device):
         for (I := 0 .. RoomHUDMessages.Length - 1):
             if (HUD := RoomHUDMessages[I]) { HUD.Hide() }
 
+        # The countdown shows the Final Showdown text once at the start.
         StartRoomCountdown(FinalIndex)
-
-        if (FinalIndex < RoomHUDMessages.Length, FinalHUD := RoomHUDMessages[FinalIndex]):
-            FinalHUD.SetText(FinalShowdownText())
-            for (Agent : GetPlayspace().GetParticipants()):
-                if (IsActiveInGame(Agent) = true) { FinalHUD.Show(Agent) }
 
     MakePlayerSpectator(Agent : agent) : void =
         if (set IsSpectator[Agent] = true):
@@ -345,6 +409,7 @@ gauntlet_manager := class(creative_device):
 
     StartRoomCountdown(RoomIndex : int)<suspends> : void =
         var TimeRemaining : int = 5
+        SetActiveRoomSpawners(RoomIndex)
         loop:
             if (TimeRemaining <= 0 or RoundInProgress = false) { break }
 
@@ -352,10 +417,12 @@ gauntlet_manager := class(creative_device):
                 if (PlayerRoom := PlayerCurrentRoom[Agent], PlayerRoom = RoomIndex, IsActiveInGame(Agent) = true):
                     if (RoomIndex < RoomHUDMessages.Length, HUD := RoomHUDMessages[RoomIndex]):
                         if (IsFinalShowdownActive = true):
-                            HUD.SetText(FinalShowdownText())
+                            if (TimeRemaining = 5):
+                                HUD.SetText(FinalShowdownText())
+                                HUD.Show(Agent)
                         else:
                             HUD.SetText(CountdownText(TimeRemaining))
-                        HUD.Show(Agent)
+                            HUD.Show(Agent)
 
             Sleep(1.0)
             set TimeRemaining -= 1
@@ -389,6 +456,9 @@ gauntlet_manager := class(creative_device):
     # ==========================================
 
     CheckRoundEndCondition() : void =
+        # In solo test mode, never end the round just because few players are left.
+        if (SoloTestMode = true) { return }
+
         ActiveCount := CheckRemainingActivePlayersCount()
         if (ActiveCount <= 1 and RoundInProgress = true):
             var LastPlayerStanding : ?agent = false
@@ -429,6 +499,9 @@ gauntlet_manager := class(creative_device):
         set ActiveGamePlayers = map{}
         set ActiveRoomGranterIndices = map{}
 
+        # Turn every guard spawner off while in the lobby.
+        SetActiveRoomSpawners(-1)
+
         if (RoomHUDMessages.Length > 0):
             for (I := 0 .. RoomHUDMessages.Length - 1):
                 if (HUD := RoomHUDMessages[I]) { HUD.Hide() }
@@ -444,7 +517,7 @@ gauntlet_manager := class(creative_device):
     # ==========================================
 
     CheckRoomWaveCompletion(RoomIndex : int) : void =
-        if (IsFinalShowdownActive = true or CheckRemainingActivePlayersCount() < 5) { return }
+        if (IsFinalShowdownActive = true or CheckRemainingActivePlayersCount() < MinPlayersForRooms) { return }
 
         CurrentQualified := GetQualifiedCount(RoomIndex)
         Quota := GetTargetQuota(RoomIndex)
@@ -500,3 +573,8 @@ gauntlet_manager := class(creative_device):
     IsQualified(Agent : agent)<transacts> : logic =
         if (Val := PlayerIsQualified[Agent]) { return Val }
         return false
+
+    IsSubscribed(Agent : agent)<transacts> : logic =
+        if (Val := SubscribedPlayers[Agent]) { return Val }
+        return false
+
